@@ -2,6 +2,8 @@
 using CrystalDecisions.Shared;
 using System;
 using System.Collections.Generic;
+using System.Configuration;
+using System.Data.SqlClient;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -25,6 +27,38 @@ namespace CrystalReportWebAPI.Utilities
             var rd = new ReportDocument();
 
             rd.Load(Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath(reportPath), reportFileName));
+
+            // Set database connection
+            string connectionString = ConfigurationManager.ConnectionStrings["DefaultConnection"].ConnectionString;
+            var builder = new SqlConnectionStringBuilder(connectionString);
+            string server = builder.DataSource;
+            string database = builder.InitialCatalog;
+            string userId = builder.UserID;
+            string password = builder.Password;
+
+            foreach (Table table in rd.Database.Tables)
+            {
+                var logonInfo = table.LogOnInfo;
+                logonInfo.ConnectionInfo.ServerName = server;
+                logonInfo.ConnectionInfo.DatabaseName = database;
+                logonInfo.ConnectionInfo.UserID = userId;
+                logonInfo.ConnectionInfo.Password = password;
+                table.ApplyLogOnInfo(logonInfo);
+            }
+
+            // Handle subreports
+            foreach (ReportDocument subreport in rd.Subreports)
+            {
+                foreach (Table table in subreport.Database.Tables)
+                {
+                    var logonInfo = table.LogOnInfo;
+                    logonInfo.ConnectionInfo.ServerName = server;
+                    logonInfo.ConnectionInfo.DatabaseName = database;
+                    logonInfo.ConnectionInfo.UserID = userId;
+                    logonInfo.ConnectionInfo.Password = password;
+                    table.ApplyLogOnInfo(logonInfo);
+                }
+            }
 
             if (parameters == null)
                 parameters = new Dictionary<string, object>();
