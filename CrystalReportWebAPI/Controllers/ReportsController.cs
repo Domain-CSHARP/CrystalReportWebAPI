@@ -54,17 +54,18 @@ namespace CrystalReportWebAPI.Controllers
         }
 
         [AllowAnonymous]
-        [Route("VersatileandPrecise/FortifyFinancialAllinOneRetirementSavings")]
+        [Route("Mewah/TaxInvoice_SalesLocal_EINV/{referenceNumber}")]
         [HttpGet]
         [ClientCacheWithEtag(60)]  //1 min client side caching
-        public HttpResponseMessage VersatileandPreciseFortifyFinancialAllinOneRetirementSavings()
+        public HttpResponseMessage MewahTaxInvoiceSalesLocalEINV(string referenceNumber)
         {
-            string reportPath = "~/Reports/VersatileandPrecise";
-            string reportFileName = "FortifyFinancialAllinOneRetirementSavings.rpt";
-            string exportFilename = "FortifyFinancialAllinOneRetirementSavings.pdf";
+            string reportPath = "~/Reports/Mewah";
+            string reportFileName = "TaxInvoice_SalesLocal_EINV.rpt";
+            string exportFilename = "TaxInvoice_SalesLocal_EINV.pdf";
 
-            HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename);
-
+            string recordSelectionFormula = "{INVOICE.INVOICE} = '" + referenceNumber + "'";
+            HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename, null, recordSelectionFormula);
+            //HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename);
             return result;
         }
     }
