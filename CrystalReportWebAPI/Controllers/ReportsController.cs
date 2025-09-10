@@ -12,48 +12,6 @@ namespace CrystalReportWebAPI.Controllers
     public class ReportsController : ApiController
     {
         [AllowAnonymous]
-        [Route("Financial/VarianceAnalysisReport")]
-        [HttpGet]
-        [ClientCacheWithEtag(60)]  //1 min client side caching
-        public HttpResponseMessage FinancialVarianceAnalysisReport()
-        {
-            string reportPath = "~/Reports/Financial";
-            string reportFileName = "YTDVarianceCrossTab.rpt";
-            string exportFilename = "YTDVarianceCrossTab.pdf";
-
-            HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename);
-            return result;
-        }
-
-        [AllowAnonymous]
-        [Route("Demonstration/ComparativeIncomeStatement")]
-        [HttpGet]
-        [ClientCacheWithEtag(60)]  //1 min client side caching
-        public HttpResponseMessage DemonstrationComparativeIncomeStatement()
-        {
-            string reportPath = "~/Reports/Demonstration";
-            string reportFileName = "ComparativeIncomeStatement.rpt";
-            string exportFilename = "ComparativeIncomeStatement.pdf";
-
-            HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename);
-            return result;
-        }
-
-        [AllowAnonymous]
-        [Route("VersatileandPrecise/Invoice")]
-        [HttpGet]
-        [ClientCacheWithEtag(60)]  //1 min client side caching
-        public HttpResponseMessage VersatileandPreciseInvoice()
-        {
-            string reportPath = "~/Reports/VersatileandPrecise";
-            string reportFileName = "Invoice.rpt";
-            string exportFilename = "Invoice.pdf";
-
-            HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename);
-            return result;
-        }
-
-        [AllowAnonymous]
         [Route("Mewah/TaxInvoice_SalesLocal_EINV/{referenceNumber}")]
         [HttpGet]
         [ClientCacheWithEtag(60)]  //1 min client side caching

@@ -1,0 +1,484 @@
+using CrystalReportWebAPI.Models;
+using CrystalReportWebAPI.Utilities;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Web.Http;
+
+namespace CrystalReportWebAPI.Controllers
+{
+    [RoutePrefix("api/Email")]
+    public class EmailController : ApiController
+    {
+        [AllowAnonymous]
+        [Route("ProcessPendingInvoices")]
+        [HttpGet]
+        public HttpResponseMessage ProcessPendingInvoices()
+        {
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(System.Configuration.ConfigurationManager.ConnectionStrings["DefaultConnection"].ConnectionString))
+                {
+                    conn.Open();
+
+                    // Check if there are pending emails to process
+                    string checkQuery = "SELECT COUNT(*) FROM VALIDATED_LOCAL_INV_PENDING_EMAIL";
+                    SqlCommand checkCmd = new SqlCommand(checkQuery, conn);
+                    int pendingCount = (int)checkCmd.ExecuteScalar();
+
+                    if (pendingCount == 0)
+                    {
+                        return Request.CreateResponse(HttpStatusCode.OK, new
+                        {
+                            Success = true,
+                            Message = "No pending emails to process",
+                            ProcessedCount = 0
+                        });
+                    }
+
+                    // Get pending invoices first, then close the reader before processing
+                    List<string> pendingInvoices = new List<string>();
+                    string selectQuery = "SELECT invoice FROM VALIDATED_LOCAL_INV_PENDING_EMAIL";
+
+                    using (SqlCommand selectCmd = new SqlCommand(selectQuery, conn))
+                    {
+                        using (SqlDataReader reader = selectCmd.ExecuteReader())
+                        {
+                            while (reader.Read())
+                            {
+                                pendingInvoices.Add(Convert.ToString(reader["invoice"]));
+                            }
+                        }
+                    }
+
+                    // Now process each invoice with the reader closed
+                    List<string> processedInvoices = new List<string>();
+                    List<string> failedInvoices = new List<string>();
+
+                    foreach (string invoiceNumber in pendingInvoices)
+                    {
+                                try
+                                {
+                                    ProcessInvoiceEmail(conn, invoiceNumber);
+                                    processedInvoices.Add(invoiceNumber);
+                                }
+                                catch (Exception ex)
+                                {
+                                    failedInvoices.Add($"{invoiceNumber}: {ex.Message}");
+                                    // LogEmailProcess("ProcessPendingInvoices", "Error", $"Failed to process invoice {invoiceNumber}: {ex.Message}", invoiceNumber);
+                                }
+                    }
+
+                    return Request.CreateResponse(HttpStatusCode.OK, new
+                    {
+                        Success = true,
+                        Message = $"Processed {processedInvoices.Count} invoices successfully",
+                        ProcessedCount = processedInvoices.Count,
+                        FailedCount = failedInvoices.Count,
+                        ProcessedInvoices = processedInvoices,
+                        FailedInvoices = failedInvoices
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                // LogEmailProcess("ProcessPendingInvoices", "Failed", ex.Message);
+                return Request.CreateErrorResponse(HttpStatusCode.InternalServerError, ex.Message);
+            }
+        }
+
+        private void ProcessInvoiceEmail(SqlConnection conn, string invoiceNumber)
+        {
+            string buyerCode = "";
+            DateTime invoiceDate = DateTime.MinValue;
+            string contractNumber = "";
+            string fieldBuyerEmail = "";
+            string fieldBuyerEmailCC = "";
+            string pdfFolder = "";
+            string bodyTemplate = "";
+            string ccRecipients = "";
+            string buyerName = "";
+            string emailFieldName = "";
+            string emailCCFieldName = "";
+
+            // Combined query to get all data in one go
+            string combinedQuery = @"
+                SELECT
+                    i.accode,
+                    i.date,
+                    i.smf,
+                    p.EMAIL_SERVER_FLD_RECIPIENT,
+                    p.EMAIL_SERVER_FLD_RECIPIENT_CC,
+                    p.PDF,
+                    p.INVOICE_BODY_MSG,
+                    p.INVOICE_EMAIL,
+                    a.NAME as BuyerName
+                FROM INVOICE i
+                CROSS JOIN (SELECT TOP 1 * FROM PROFILE) p
+                LEFT JOIN ACCODE a ON a.CODE = i.accode
+                WHERE i.INVOICE = @InvoiceNumber";
+
+            using (SqlCommand cmd = new SqlCommand(combinedQuery, conn))
+            {
+                cmd.Parameters.AddWithValue("@InvoiceNumber", invoiceNumber);
+
+                using (SqlDataReader reader = cmd.ExecuteReader())
+                {
+                    if (!reader.Read())
+                    {
+                        throw new Exception($"Invoice {invoiceNumber} not found");
+                    }
+
+                    buyerCode = Convert.ToString(reader["accode"]);
+                    invoiceDate = reader["date"] != DBNull.Value ? (DateTime)reader["date"] : DateTime.MinValue;
+                    contractNumber = Convert.ToString(reader["smf"]);
+                    emailFieldName = Convert.ToString(reader["EMAIL_SERVER_FLD_RECIPIENT"]);
+                    emailCCFieldName = Convert.ToString(reader["EMAIL_SERVER_FLD_RECIPIENT_CC"]);
+                    pdfFolder = Convert.ToString(reader["PDF"]);
+                    bodyTemplate = Convert.ToString(reader["INVOICE_BODY_MSG"]);
+                    ccRecipients = Convert.ToString(reader["INVOICE_EMAIL"]);
+                    buyerName = Convert.ToString(reader["BuyerName"]);
+
+                    if (string.IsNullOrEmpty(buyerName))
+                    {
+                        throw new Exception($"Buyer {buyerCode} not found");
+                    }
+                }
+            }
+
+            // Get actual email addresses from ACCODE table using the field names
+            if (!string.IsNullOrEmpty(emailFieldName) || !string.IsNullOrEmpty(emailCCFieldName))
+            {
+                string emailQuery = "SELECT ";
+                List<string> selectFields = new List<string>();
+                List<SqlParameter> parameters = new List<SqlParameter>();
+
+                if (!string.IsNullOrEmpty(emailFieldName))
+                {
+                    selectFields.Add($"[{emailFieldName}] as RecipientEmail");
+                }
+                if (!string.IsNullOrEmpty(emailCCFieldName))
+                {
+                    selectFields.Add($"[{emailCCFieldName}] as CCEmail");
+                }
+
+                if (selectFields.Count > 0)
+                {
+                    emailQuery += string.Join(", ", selectFields) + " FROM ACCODE WHERE CODE = @BuyerCode";
+
+                    using (SqlCommand emailCmd = new SqlCommand(emailQuery, conn))
+                    {
+                        emailCmd.Parameters.AddWithValue("@BuyerCode", buyerCode);
+
+                        using (SqlDataReader emailReader = emailCmd.ExecuteReader())
+                        {
+                            if (emailReader.Read())
+                            {
+                                if (!string.IsNullOrEmpty(emailFieldName))
+                                {
+                                    fieldBuyerEmail = Convert.ToString(emailReader["RecipientEmail"]);
+                                }
+                                if (!string.IsNullOrEmpty(emailCCFieldName))
+                                {
+                                    fieldBuyerEmailCC = Convert.ToString(emailReader["CCEmail"]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Generate PDF
+            string pdfPath = GenerateAndSavePdf(invoiceNumber, invoiceDate, buyerName, pdfFolder);
+
+            // Prepare email content
+            string subject = $"E-INVOICE {buyerName} - DELIVERY DATED {invoiceDate:dd/MM/yy}";
+            string body = PrepareEmailBody(bodyTemplate, invoiceNumber, invoiceDate, buyerCode, conn);
+
+            // Combine CC recipients
+            string combinedCC = fieldBuyerEmailCC ?? "";
+            if (!string.IsNullOrEmpty(ccRecipients) && !string.IsNullOrEmpty(combinedCC))
+            {
+                combinedCC += ";" + ccRecipients;
+            }
+            else if (!string.IsNullOrEmpty(ccRecipients))
+            {
+                combinedCC = ccRecipients;
+            }
+
+            // Debug logging for insert operation
+            System.Diagnostics.Debug.WriteLine("=== INSERT DEBUG LOG ===");
+            System.Diagnostics.Debug.WriteLine($"Sender: '{fieldBuyerEmail}' (Length: {fieldBuyerEmail?.Length ?? 0})");
+            System.Diagnostics.Debug.WriteLine($"CC: '{combinedCC}' (Length: {combinedCC?.Length ?? 0})");
+            System.Diagnostics.Debug.WriteLine($"Subject: '{subject}' (Length: {subject?.Length ?? 0})");
+            System.Diagnostics.Debug.WriteLine($"Body Length: {body?.Length ?? 0}");
+            System.Diagnostics.Debug.WriteLine($"Attach1: '{pdfPath}' (Length: {pdfPath?.Length ?? 0})");
+            System.Diagnostics.Debug.WriteLine("=== END DEBUG LOG ===");
+
+            // Insert into LogMail_Inv with all required fields and get EmailKey using OUTPUT
+            string insertQuery = @"
+                INSERT INTO LogMail_Inv (
+                    SENDER,
+                    CC,
+                    SUBJECT,
+                    BODY,
+                    ATTACH1,
+                    ATTACH2,
+                    ATTACH3,
+                    STATUS,
+                    DATE
+                )
+                OUTPUT INSERTED.pkkey
+                VALUES (
+                    @Sender,
+                    @CC,
+                    @Subject,
+                    @Body,
+                    @Attach1,
+                    NULL,
+                    NULL,
+                    0,
+                    GETDATE()
+                )";
+
+            SqlCommand insertCmd = new SqlCommand(insertQuery, conn);
+            insertCmd.Parameters.AddWithValue("@Sender", fieldBuyerEmail ?? "");
+            insertCmd.Parameters.AddWithValue("@CC", combinedCC);
+            insertCmd.Parameters.AddWithValue("@Subject", subject ?? "");
+            insertCmd.Parameters.AddWithValue("@Body", body ?? "");
+            insertCmd.Parameters.AddWithValue("@Attach1", pdfPath ?? "");
+
+            object identityResult = insertCmd.ExecuteScalar();
+            if (identityResult == null || identityResult == DBNull.Value)
+            {
+                throw new Exception("Failed to get EmailKey after insert");
+            }
+            int EmailKey = Convert.ToInt32(identityResult);
+
+            // Send email using PowerShell
+            PowerShellSendMail(EmailKey, conn);
+
+            // Update invoice
+            string updateQuery = @"
+                UPDATE INVOICE
+                SET EMAILSENT_USER = 'API',
+                    EMAILSENT_DATE = GETDATE()
+                WHERE INVOICE = @InvoiceNumber";
+
+            SqlCommand updateCmd = new SqlCommand(updateQuery, conn);
+            updateCmd.Parameters.AddWithValue("@InvoiceNumber", invoiceNumber);
+            updateCmd.ExecuteNonQuery();
+
+            // LogEmailProcess("ProcessInvoiceEmail", "Success", $"Successfully processed invoice: {invoiceNumber}", invoiceNumber);
+        }
+
+        private string GenerateAndSavePdf(string invoiceNumber, DateTime invoiceDate, string buyerName, string pdfFolder)
+        {
+            try
+            {
+                // Generate PDF using existing Crystal Report logic
+                string reportPath = "~/Reports/Mewah";
+                string reportFileName = "TaxInvoice_SalesLocal_EINV.rpt";
+                string recordSelectionFormula = $"{{INVOICE.INVOICE}} = '{invoiceNumber}'";
+
+                // Create PDF directory structure (same logic as @PdfPath from stored procedure)
+                string dateStr = invoiceDate.ToString("yyyyMMdd");
+                string pdfDirectory = Path.Combine(pdfFolder, "INVPDF", $"{dateStr}_{invoiceNumber}_{buyerName}");
+
+                if (!Directory.Exists(pdfDirectory))
+                {
+                    Directory.CreateDirectory(pdfDirectory);
+                }
+
+                // Generate filename (same logic as stored procedure)
+                string fileName = $"{invoiceNumber}_{dateStr}_{buyerName}.pdf";
+                string pdfPath = Path.Combine(pdfDirectory, fileName);
+
+                // Generate and save PDF directly to file system
+                CrystalReport.SaveReportToFile(reportPath, reportFileName, pdfPath, null, recordSelectionFormula);
+
+                return pdfPath;
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed to generate PDF: {ex.Message}");
+            }
+        }
+
+        private string PrepareEmailBody(string bodyTemplate, string invoiceNumber, DateTime invoiceDate, string buyerCode, SqlConnection conn)
+        {
+            string body = bodyTemplate;
+
+            // Replace placeholders
+            body = body.Replace("@INVOICE", invoiceNumber);
+            body = body.Replace("@INVDATE", invoiceDate.ToString("dd/MM/yyyy"));
+
+            // Get contact information and sender details in one query
+            string combinedQuery = @"
+                SELECT
+                    (SELECT TOP 1 CONTACT1 FROM ACCODE WHERE CODE = @BuyerCode) as Contact,
+                    (SELECT TOP 1 SENDER_DETAIL FROM acc_sign WHERE acc_sign = '') as SenderDetail";
+
+            using (SqlCommand cmd = new SqlCommand(combinedQuery, conn))
+            {
+                cmd.Parameters.AddWithValue("@BuyerCode", buyerCode);
+
+                using (SqlDataReader reader = cmd.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        string contact = Convert.ToString(reader["Contact"]);
+                        string senderDetail = Convert.ToString(reader["SenderDetail"]);
+
+                        body = body.Replace("@CONTACT", contact);
+
+                        if (!string.IsNullOrEmpty(senderDetail))
+                        {
+                            body += senderDetail;
+                        }
+                    }
+                }
+            }
+
+            return body;
+        }
+
+        private void PowerShellSendMail(int EmailKey, SqlConnection conn)
+        {
+            string sender = "";
+            string recipient = "";
+            string recipientCC = "";
+            string subject = "";
+            string body = "";
+            string attach = "";
+
+            // Get sender from profile
+            string senderQuery = "SELECT TOP 1 EMAIL_SERVER_GRP_EMAIL FROM PROFILE";
+            using (SqlCommand senderCmd = new SqlCommand(senderQuery, conn))
+            {
+                object result = senderCmd.ExecuteScalar();
+                if (result != DBNull.Value)
+                {
+                    sender = Convert.ToString(result).Trim();
+                }
+            }
+
+            // Retrieve email details from LogMail_Inv
+            string selectQuery = "SELECT SENDER, CC, SUBJECT, BODY, ATTACH1, ATTACH2, ATTACH3 FROM LogMail_Inv WHERE pkkey = @EmailKey";
+            using (SqlCommand cmd = new SqlCommand(selectQuery, conn))
+            {
+                cmd.Parameters.AddWithValue("@EmailKey", EmailKey);
+                using (SqlDataReader reader = cmd.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        recipient = Convert.ToString(reader["SENDER"]).Trim();
+                        recipientCC = Convert.ToString(reader["CC"]).Trim();
+                        subject = Convert.ToString(reader["SUBJECT"]).Trim();
+                        body = Convert.ToString(reader["BODY"]).Trim();
+
+                        // Build attach string
+                        for (int i = 1; i <= 3; i++)
+                        {
+                            string path = Convert.ToString(reader["ATTACH" + i]).Trim();
+                            if (!string.IsNullOrEmpty(path) && File.Exists(path))
+                            {
+                                if (!string.IsNullOrEmpty(attach))
+                                {
+                                    attach += ";";
+                                }
+                                attach += path;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Prepare PowerShell command
+            string scriptPath = Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath("~/"), "..", "EmailSender.ps1");
+            string arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -EmailSender \"{sender}\" -Recipients \"{recipient}\" -CCRecipients \"{recipientCC}\" -Subject \"{subject}\" -Body \"{body}\" -Attach \"{attach}\"";
+
+            // Execute PowerShell script
+            using (Process process = new Process())
+            {
+                process.StartInfo.FileName = "powershell.exe";
+                process.StartInfo.Arguments = arguments;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+
+                try
+                {
+                    process.Start();
+                    process.WaitForExit();
+
+                    if (process.ExitCode == 0)
+                    {
+                        // Update status and sent date
+                        string updateStr = $"UPDATE LogMail_Inv SET status = 1, sent = GETDATE() WHERE pkkey = {EmailKey}";
+                        SqlCommand updateCmd = new SqlCommand(updateStr, conn);
+                        updateCmd.ExecuteNonQuery();
+                    }
+                    else
+                    {
+                        // Log error if needed
+                        string error = process.StandardError.ReadToEnd();
+                        System.Diagnostics.Debug.WriteLine($"PowerShell script failed: {error}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Failed to execute PowerShell script: {ex.Message}");
+                }
+            }
+        }
+
+        /*
+        private void LogEmailProcess(string processName, string status, string message, string invoiceNumber = null)
+        {
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(System.Configuration.ConfigurationManager.ConnectionStrings["DefaultConnection"].ConnectionString))
+                {
+                    conn.Open();
+
+                    string logQuery = @"
+                        INSERT INTO EmailJobLog (
+                            ProcessName,
+                            Status,
+                            Message,
+                            CreatedDate,
+                            InvoiceNumber
+                        )
+                        VALUES (
+                            @ProcessName,
+                            @Status,
+                            @Message,
+                            GETDATE(),
+                            @InvoiceNumber
+                        )";
+
+                    SqlCommand logCmd = new SqlCommand(logQuery, conn);
+                    logCmd.Parameters.AddWithValue("@ProcessName", processName);
+                    logCmd.Parameters.AddWithValue("@Status", status);
+                    logCmd.Parameters.AddWithValue("@Message", message);
+                    logCmd.Parameters.AddWithValue("@InvoiceNumber", invoiceNumber ?? (object)DBNull.Value);
+
+                    logCmd.ExecuteNonQuery();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log to system if database logging fails
+                System.Diagnostics.Debug.WriteLine($"Email logging failed: {ex.Message}");
+            }
+        }
+        */
+    }
+}

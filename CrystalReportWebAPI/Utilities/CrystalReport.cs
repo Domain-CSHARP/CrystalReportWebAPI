@@ -35,6 +35,12 @@ namespace CrystalReportWebAPI.Utilities
             string database = builder.InitialCatalog;
             bool integratedSecurity = builder.IntegratedSecurity;
 
+            // Debug: Log current Windows identity for troubleshooting
+            string currentUser = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: Current Windows identity: {currentUser}");
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: Using Integrated Security: {integratedSecurity}");
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: Server: {server}, Database: {database}");
+
             // Main report tables
 foreach (Table table in rd.Database.Tables)
 {
@@ -93,7 +99,7 @@ foreach (ReportDocument subreport in rd.Subreports)
                 {
                     if (param.Name.Equals("Letter head", StringComparison.OrdinalIgnoreCase))
                     {
-                        parameters[param.Name] = "True"; 
+                        parameters[param.Name] = "True";
                     }
                     else if (param.ParameterValueType == ParameterValueKind.StringParameter)
                         parameters[param.Name] = "";
@@ -135,6 +141,119 @@ foreach (ReportDocument subreport in rd.Subreports)
             result.Content.Headers.ContentType =
                 new System.Net.Http.Headers.MediaTypeHeaderValue("application/pdf");
             return result;
+        }
+
+        public static void SaveReportToFile(
+            string reportPath,
+            string reportFileName,
+            string outputFilePath,
+            Dictionary<string, object> parameters = null,
+            string recordSelectionFormula = null)
+        {
+            var rd = new ReportDocument();
+
+            rd.Load(Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath(reportPath), reportFileName));
+
+            // Set database connection
+            string connectionString = ConfigurationManager.ConnectionStrings["DefaultConnection"].ConnectionString;
+            var builder = new SqlConnectionStringBuilder(connectionString);
+            string server = builder.DataSource;
+            string database = builder.InitialCatalog;
+            bool integratedSecurity = builder.IntegratedSecurity;
+
+            // Main report tables
+            foreach (Table table in rd.Database.Tables)
+            {
+                var logonInfo = table.LogOnInfo;
+                logonInfo.ConnectionInfo.ServerName = server;
+                logonInfo.ConnectionInfo.DatabaseName = database;
+                if (integratedSecurity)
+                {
+                    logonInfo.ConnectionInfo.IntegratedSecurity = true;
+                }
+                else
+                {
+                    logonInfo.ConnectionInfo.UserID = builder.UserID;
+                    logonInfo.ConnectionInfo.Password = builder.Password ?? string.Empty;
+                    logonInfo.ConnectionInfo.IntegratedSecurity = false;
+                }
+                table.ApplyLogOnInfo(logonInfo);
+
+                // Force refresh of location
+                table.Location = table.Location;
+            }
+
+            // Subreport tables
+            foreach (ReportDocument subreport in rd.Subreports)
+            {
+                foreach (Table table in subreport.Database.Tables)
+                {
+                    var logonInfo = table.LogOnInfo;
+                    logonInfo.ConnectionInfo.ServerName = server;
+                    logonInfo.ConnectionInfo.DatabaseName = database;
+                    if (integratedSecurity)
+                    {
+                        logonInfo.ConnectionInfo.IntegratedSecurity = true;
+                    }
+                    else
+                    {
+                        logonInfo.ConnectionInfo.UserID = builder.UserID;
+                        logonInfo.ConnectionInfo.Password = builder.Password ?? string.Empty;
+                        logonInfo.ConnectionInfo.IntegratedSecurity = false;
+                    }
+                    table.ApplyLogOnInfo(logonInfo);
+
+                    // Force refresh of location
+                    table.Location = table.Location;
+                }
+            }
+
+            if (parameters == null)
+                parameters = new Dictionary<string, object>();
+
+            // Set default values for unlinked parameters only
+            foreach (ParameterField param in rd.ParameterFields)
+            {
+                // Skip subreport-linked parameters (ReportName is filled for subreports)
+                if (string.IsNullOrEmpty(param.ReportName) && !parameters.ContainsKey(param.Name))
+                {
+                    if (param.Name.Equals("Letter head", StringComparison.OrdinalIgnoreCase))
+                    {
+                        parameters[param.Name] = "True";
+                    }
+                    else if (param.ParameterValueType == ParameterValueKind.StringParameter)
+                        parameters[param.Name] = "";
+                    else if (param.ParameterValueType == ParameterValueKind.NumberParameter)
+                        parameters[param.Name] = 0;
+                    else if (param.ParameterValueType == ParameterValueKind.DateParameter)
+                        parameters[param.Name] = DateTime.Now;
+                    else if (param.ParameterValueType == ParameterValueKind.BooleanParameter)
+                        parameters[param.Name] = false;
+                }
+            }
+
+            // Apply parameters
+            foreach (var param in parameters)
+            {
+                rd.SetParameterValue(param.Key, param.Value);
+            }
+
+            if (!string.IsNullOrEmpty(recordSelectionFormula))
+            {
+                rd.RecordSelectionFormula = recordSelectionFormula;
+            }
+
+            // Ensure output directory exists
+            string outputDirectory = Path.GetDirectoryName(outputFilePath);
+            if (!Directory.Exists(outputDirectory))
+            {
+                Directory.CreateDirectory(outputDirectory);
+            }
+
+            // Export directly to file
+            rd.ExportToDisk(ExportFormatType.PortableDocFormat, outputFilePath);
+            rd.Close();
+            rd.Dispose();
         }
     }
 }
