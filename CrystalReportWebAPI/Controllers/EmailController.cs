@@ -7,14 +7,47 @@ using System.Data.SqlClient;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
-using System.Net.Http;
+using System.Net.H  ttp;
 using System.Web.Http;
+using System.Web.Hosting;
 
 namespace CrystalReportWebAPI.Controllers
 {
     [RoutePrefix("api/Email")]
     public class EmailController : ApiController
     {
+        private static readonly object _logLock = new object();
+
+        private void WriteLog(string logType, string message, string invoiceNumber = null)
+        {
+            try
+            {
+                string logsFolder = Path.Combine(HostingEnvironment.MapPath("~/"), "..", "logs");
+                if (!Directory.Exists(logsFolder))
+                {
+                    Directory.CreateDirectory(logsFolder);
+                }
+
+                string logFileName = $"{logType}_{DateTime.Now:yyyyMMdd}.log";
+                string logFilePath = Path.Combine(logsFolder, logFileName);
+
+                string logEntry = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | Invoice: {invoiceNumber ?? "N/A"} | {message}{Environment.NewLine}";
+
+                lock (_logLock)
+                {
+                    File.AppendAllText(logFilePath, logEntry);
+                }
+
+                // Also write to debug console for immediate visibility
+                System.Diagnostics.Debug.WriteLine($"[{logType}] {message}");
+            }
+            catch (Exception ex)
+            {
+                // If logging fails, at least try to write to debug console
+                System.Diagnostics.Debug.WriteLine($"Logging failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Original message: {message}");
+            }
+        }
         [AllowAnonymous]
         [Route("ProcessPendingInvoices")]
         [HttpGet]
@@ -212,13 +245,13 @@ namespace CrystalReportWebAPI.Controllers
             }
 
             // Debug logging for insert operation
-            System.Diagnostics.Debug.WriteLine("=== INSERT DEBUG LOG ===");
-            System.Diagnostics.Debug.WriteLine($"Sender: '{fieldBuyerEmail}' (Length: {fieldBuyerEmail?.Length ?? 0})");
-            System.Diagnostics.Debug.WriteLine($"CC: '{combinedCC}' (Length: {combinedCC?.Length ?? 0})");
-            System.Diagnostics.Debug.WriteLine($"Subject: '{subject}' (Length: {subject?.Length ?? 0})");
-            System.Diagnostics.Debug.WriteLine($"Body Length: {body?.Length ?? 0}");
-            System.Diagnostics.Debug.WriteLine($"Attach1: '{pdfPath}' (Length: {pdfPath?.Length ?? 0})");
-            System.Diagnostics.Debug.WriteLine("=== END DEBUG LOG ===");
+            WriteLog("DEBUG", $"=== INSERT DEBUG LOG ===", invoiceNumber);
+            WriteLog("DEBUG", $"Sender: '{fieldBuyerEmail}' (Length: {fieldBuyerEmail?.Length ?? 0})", invoiceNumber);
+            WriteLog("DEBUG", $"CC: '{combinedCC}' (Length: {combinedCC?.Length ?? 0})", invoiceNumber);
+            WriteLog("DEBUG", $"Subject: '{subject}' (Length: {subject?.Length ?? 0})", invoiceNumber);
+            WriteLog("DEBUG", $"Body Length: {body?.Length ?? 0}", invoiceNumber);
+            WriteLog("DEBUG", $"Attach1: '{pdfPath}' (Length: {pdfPath?.Length ?? 0})", invoiceNumber);
+            WriteLog("DEBUG", $"=== END DEBUG LOG ===", invoiceNumber);
 
             // Insert into LogMail_Inv with all required fields and get EmailKey using OUTPUT
             string insertQuery = @"
@@ -403,6 +436,9 @@ namespace CrystalReportWebAPI.Controllers
             string scriptPath = Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath("~/"), "..", "EmailSender.ps1");
             string arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -EmailSender \"{sender}\" -Recipients \"{recipient}\" -CCRecipients \"{recipientCC}\" -Subject \"{subject}\" -Body \"{body}\" -Attach \"{attach}\"";
 
+            // Log PowerShell execution attempt
+            WriteLog("POWERSHELL", $"Attempting to execute: powershell.exe {arguments}", EmailKey.ToString());
+
             // Execute PowerShell script
             using (Process process = new Process())
             {
@@ -420,6 +456,7 @@ namespace CrystalReportWebAPI.Controllers
 
                     if (process.ExitCode == 0)
                     {
+                        WriteLog("POWERSHELL", $"PowerShell script executed successfully. Exit code: {process.ExitCode}", EmailKey.ToString());
                         // Update status and sent date
                         string updateStr = $"UPDATE LogMail_Inv SET status = 1, sent = GETDATE() WHERE pkkey = {EmailKey}";
                         SqlCommand updateCmd = new SqlCommand(updateStr, conn);
@@ -429,12 +466,12 @@ namespace CrystalReportWebAPI.Controllers
                     {
                         // Log error if needed
                         string error = process.StandardError.ReadToEnd();
-                        System.Diagnostics.Debug.WriteLine($"PowerShell script failed: {error}");
+                        WriteLog("ERROR", $"PowerShell script failed. Exit code: {process.ExitCode}. Error: {error}", EmailKey.ToString());
                     }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"Failed to execute PowerShell script: {ex.Message}");
+                    WriteLog("ERROR", $"Failed to execute PowerShell script: {ex.Message}", EmailKey.ToString());
                 }
             }
         }
