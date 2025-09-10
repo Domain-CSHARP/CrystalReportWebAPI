@@ -33,32 +33,54 @@ namespace CrystalReportWebAPI.Utilities
             var builder = new SqlConnectionStringBuilder(connectionString);
             string server = builder.DataSource;
             string database = builder.InitialCatalog;
-            string userId = builder.UserID;
-            string password = builder.Password;
+            bool integratedSecurity = builder.IntegratedSecurity;
 
-            foreach (Table table in rd.Database.Tables)
-            {
-                var logonInfo = table.LogOnInfo;
-                logonInfo.ConnectionInfo.ServerName = server;
-                logonInfo.ConnectionInfo.DatabaseName = database;
-                logonInfo.ConnectionInfo.UserID = userId;
-                logonInfo.ConnectionInfo.Password = password;
-                table.ApplyLogOnInfo(logonInfo);
-            }
+            // Main report tables
+foreach (Table table in rd.Database.Tables)
+{
+    var logonInfo = table.LogOnInfo;
+    logonInfo.ConnectionInfo.ServerName = server;
+    logonInfo.ConnectionInfo.DatabaseName = database;
+    if (integratedSecurity)
+    {
+        logonInfo.ConnectionInfo.IntegratedSecurity = true;
+    }
+    else
+    {
+        logonInfo.ConnectionInfo.UserID = builder.UserID;
+        logonInfo.ConnectionInfo.Password = builder.Password ?? string.Empty;
+        logonInfo.ConnectionInfo.IntegratedSecurity = false;
+    }
+    table.ApplyLogOnInfo(logonInfo);
 
-            // Handle subreports
-            foreach (ReportDocument subreport in rd.Subreports)
-            {
-                foreach (Table table in subreport.Database.Tables)
-                {
-                    var logonInfo = table.LogOnInfo;
-                    logonInfo.ConnectionInfo.ServerName = server;
-                    logonInfo.ConnectionInfo.DatabaseName = database;
-                    logonInfo.ConnectionInfo.UserID = userId;
-                    logonInfo.ConnectionInfo.Password = password;
-                    table.ApplyLogOnInfo(logonInfo);
-                }
-            }
+    // Force refresh of location
+    table.Location = table.Location;
+}
+
+// Subreport tables
+foreach (ReportDocument subreport in rd.Subreports)
+{
+    foreach (Table table in subreport.Database.Tables)
+    {
+        var logonInfo = table.LogOnInfo;
+        logonInfo.ConnectionInfo.ServerName = server;
+        logonInfo.ConnectionInfo.DatabaseName = database;
+        if (integratedSecurity)
+        {
+            logonInfo.ConnectionInfo.IntegratedSecurity = true;
+        }
+        else
+        {
+            logonInfo.ConnectionInfo.UserID = builder.UserID;
+            logonInfo.ConnectionInfo.Password = builder.Password ?? string.Empty;
+            logonInfo.ConnectionInfo.IntegratedSecurity = false;
+        }
+        table.ApplyLogOnInfo(logonInfo);
+
+        // Force refresh of location
+        table.Location = table.Location;
+    }
+}
 
             if (parameters == null)
                 parameters = new Dictionary<string, object>();
