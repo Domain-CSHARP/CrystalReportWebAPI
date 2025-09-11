@@ -452,6 +452,9 @@
     <Content Include="Views\Home\Index.cshtml" />
     <Content Include="Views\Shared\Error.cshtml" />
     <Content Include="Views\Shared\_Layout.cshtml" />
+    <Content Include="Reports\Mewah\TaxInvoice_SalesLocal_EINV.rpt" />
+    <Content Include="Reports\Mewah\TaxInvoice_SalesLocal_EINV - final test ok.rpt" />
+    <Content Include="Reports\Mewah\TaxInvoice_SalesLocal_EINV - test ok.rpt" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="App_Data\" />

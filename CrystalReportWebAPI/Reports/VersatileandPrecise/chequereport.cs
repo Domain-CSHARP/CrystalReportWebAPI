@@ -30,24 +30,6 @@ namespace CrystalReportWebAPI.Reports.VersatileandPrecise {
             }
         }
         
-        public override bool NewGenerator {
-            get {
-                return true;
-            }
-            set {
-                // Do nothing
-            }
-        }
-        
-        public override string FullResourceName {
-            get {
-                return "CrystalReportWebAPI.Reports.VersatileandPrecise.chequereport.rpt";
-            }
-            set {
-                // Do nothing
-            }
-        }
-        
         [Browsable(false)]
         [DesignerSerializationVisibilityAttribute(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public CrystalDecisions.CrystalReports.Engine.Section Section35 {
