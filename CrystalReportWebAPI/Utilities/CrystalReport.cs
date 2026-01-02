@@ -79,11 +79,14 @@ foreach (Table table in rd.Database.Tables)
     {
         // Force refresh of location
         table.Location = table.Location;
+        System.Diagnostics.Debug.WriteLine($"CrystalReport: Successfully set location for table {table.Name}");
     }
     catch (Exception ex)
     {
-        System.Diagnostics.Debug.WriteLine($"CrystalReport: ERROR on table {table.Name}: {ex.Message}");
-        throw;
+        string identity = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+        System.Diagnostics.Debug.WriteLine($"CrystalReport: ERROR on table {table.Name} (Location: {table.Location}): {ex.Message}");
+        // Provide more context in the exception including the identity running the process
+        throw new Exception($"Failed to set location for table '{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Original error: {ex.Message}", ex);
     }
 }
 
@@ -127,11 +130,13 @@ foreach (ReportDocument subreport in rd.Subreports)
         {
             // Force refresh of location
             table.Location = table.Location;
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: Successfully set location for subreport table {subreport.Name}.{table.Name}");
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"CrystalReport: ERROR on subreport table {subreport.Name}.{table.Name}: {ex.Message}");
-            throw;
+            string identity = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: ERROR on subreport table {subreport.Name}.{table.Name} (Location: {table.Location}): {ex.Message}");
+            throw new Exception($"Failed to set location for subreport table '{subreport.Name}.{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Original error: {ex.Message}", ex);
         }
     }
 }
@@ -237,10 +242,17 @@ foreach (ReportDocument subreport in rd.Subreports)
                     }
                     logonInfo.ConnectionInfo.IntegratedSecurity = false;
                 }
-                table.ApplyLogOnInfo(logonInfo);
-
-                // Force refresh of location
-                table.Location = table.Location;
+                try 
+                {
+                    table.ApplyLogOnInfo(logonInfo);
+                    // Force refresh of location
+                    table.Location = table.Location;
+                }
+                catch (Exception ex)
+                {
+                     string identity = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+                     throw new Exception($"Failed to set location for table '{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Original error: {ex.Message}", ex);
+                }
             }
 
             // Subreport tables
@@ -277,10 +289,17 @@ foreach (ReportDocument subreport in rd.Subreports)
                         }
                         logonInfo.ConnectionInfo.IntegratedSecurity = false;
                     }
-                    table.ApplyLogOnInfo(logonInfo);
-
-                    // Force refresh of location
-                    table.Location = table.Location;
+                    try 
+                    {
+                        table.ApplyLogOnInfo(logonInfo);
+                        // Force refresh of location
+                        table.Location = table.Location;
+                    }
+                    catch (Exception ex)
+                    {
+                         string identity = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+                         throw new Exception($"Failed to set location for subreport table '{subreport.Name}.{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Original error: {ex.Message}", ex);
+                    }
                 }
             }
 
@@ -380,6 +399,14 @@ foreach (ReportDocument subreport in rd.Subreports)
                 password = string.Empty;
                 if (builder.ContainsKey("Password")) password = builder["Password"] as string;
                 else if (builder.ContainsKey("Pwd")) password = builder["Pwd"] as string;
+
+                // For Crystal Reports, if we are using ODBC DSN, we might need to ensure Database remains empty 
+                // if it's already part of the DSN configuration, OR set it explicitly if it's missing.
+                if (string.IsNullOrEmpty(database) && builder.ContainsKey("DSN"))
+                {
+                    // If DSN is used, DatabaseName might not be required or might be handled by the DSN itself.
+                    // However, we leave it as extracted (empty or from builder).
+                }
             }
             else
             {
