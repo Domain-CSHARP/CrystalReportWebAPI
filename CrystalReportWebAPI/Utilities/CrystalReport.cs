@@ -45,27 +45,46 @@ foreach (Table table in rd.Database.Tables)
     var logonInfo = table.LogOnInfo;
     if (string.Equals(providerName, "System.Data.Odbc", StringComparison.OrdinalIgnoreCase))
     {
-        logonInfo.ConnectionInfo.ServerName = fullConnectionString;
+        // For ODBC, ServerName should be the DSN name or the full connection string
+        logonInfo.ConnectionInfo.ServerName = string.IsNullOrEmpty(server) ? fullConnectionString : server;
     }
     else
     {
         logonInfo.ConnectionInfo.ServerName = server;
     }
-    logonInfo.ConnectionInfo.DatabaseName = database;
+    if (!string.IsNullOrEmpty(database))
+    {
+        logonInfo.ConnectionInfo.DatabaseName = database;
+    }
+    
     if (integratedSecurity)
     {
         logonInfo.ConnectionInfo.IntegratedSecurity = true;
     }
-    else
+    else if (!string.IsNullOrEmpty(userId))
     {
         logonInfo.ConnectionInfo.UserID = userId;
-        logonInfo.ConnectionInfo.Password = password ?? string.Empty;
+        if (!string.IsNullOrEmpty(password))
+        {
+            logonInfo.ConnectionInfo.Password = password;
+        }
         logonInfo.ConnectionInfo.IntegratedSecurity = false;
     }
+    System.Diagnostics.Debug.WriteLine($"CrystalReport: Applying logon to table {table.Name}");
+    System.Diagnostics.Debug.WriteLine($"CrystalReport: Server: {logonInfo.ConnectionInfo.ServerName}, Database: {logonInfo.ConnectionInfo.DatabaseName}, User: {logonInfo.ConnectionInfo.UserID}, Integrated: {logonInfo.ConnectionInfo.IntegratedSecurity}");
+    
     table.ApplyLogOnInfo(logonInfo);
 
-    // Force refresh of location
-    table.Location = table.Location;
+    try 
+    {
+        // Force refresh of location
+        table.Location = table.Location;
+    }
+    catch (Exception ex)
+    {
+        System.Diagnostics.Debug.WriteLine($"CrystalReport: ERROR on table {table.Name}: {ex.Message}");
+        throw;
+    }
 }
 
 // Subreport tables
@@ -76,27 +95,44 @@ foreach (ReportDocument subreport in rd.Subreports)
         var logonInfo = table.LogOnInfo;
         if (string.Equals(providerName, "System.Data.Odbc", StringComparison.OrdinalIgnoreCase))
         {
-            logonInfo.ConnectionInfo.ServerName = fullConnectionString;
+            // For ODBC, ServerName should be the DSN name or the full connection string
+            logonInfo.ConnectionInfo.ServerName = string.IsNullOrEmpty(server) ? fullConnectionString : server;
         }
         else
         {
             logonInfo.ConnectionInfo.ServerName = server;
         }
-        logonInfo.ConnectionInfo.DatabaseName = database;
+        if (!string.IsNullOrEmpty(database))
+        {
+            logonInfo.ConnectionInfo.DatabaseName = database;
+        }
+
         if (integratedSecurity)
         {
             logonInfo.ConnectionInfo.IntegratedSecurity = true;
         }
-        else
+        else if (!string.IsNullOrEmpty(userId))
         {
             logonInfo.ConnectionInfo.UserID = userId;
-            logonInfo.ConnectionInfo.Password = password ?? string.Empty;
+            if (!string.IsNullOrEmpty(password))
+            {
+                logonInfo.ConnectionInfo.Password = password;
+            }
             logonInfo.ConnectionInfo.IntegratedSecurity = false;
         }
+        System.Diagnostics.Debug.WriteLine($"CrystalReport: Applying logon to subreport table {subreport.Name}.{table.Name}");
         table.ApplyLogOnInfo(logonInfo);
 
-        // Force refresh of location
-        table.Location = table.Location;
+        try 
+        {
+            // Force refresh of location
+            table.Location = table.Location;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: ERROR on subreport table {subreport.Name}.{table.Name}: {ex.Message}");
+            throw;
+        }
     }
 }
 
@@ -175,21 +211,30 @@ foreach (ReportDocument subreport in rd.Subreports)
                 var logonInfo = table.LogOnInfo;
                 if (string.Equals(providerName, "System.Data.Odbc", StringComparison.OrdinalIgnoreCase))
                 {
-                    logonInfo.ConnectionInfo.ServerName = fullConnectionString;
+                    // For ODBC, ServerName should be the DSN name or the full connection string
+                    logonInfo.ConnectionInfo.ServerName = string.IsNullOrEmpty(server) ? fullConnectionString : server;
                 }
                 else
                 {
                     logonInfo.ConnectionInfo.ServerName = server;
                 }
-                logonInfo.ConnectionInfo.DatabaseName = database;
+
+                if (!string.IsNullOrEmpty(database))
+                {
+                    logonInfo.ConnectionInfo.DatabaseName = database;
+                }
+
                 if (integratedSecurity)
                 {
                     logonInfo.ConnectionInfo.IntegratedSecurity = true;
                 }
-                else
+                else if (!string.IsNullOrEmpty(userId))
                 {
                     logonInfo.ConnectionInfo.UserID = userId;
-                    logonInfo.ConnectionInfo.Password = password ?? string.Empty;
+                    if (!string.IsNullOrEmpty(password))
+                    {
+                        logonInfo.ConnectionInfo.Password = password;
+                    }
                     logonInfo.ConnectionInfo.IntegratedSecurity = false;
                 }
                 table.ApplyLogOnInfo(logonInfo);
@@ -206,21 +251,30 @@ foreach (ReportDocument subreport in rd.Subreports)
                     var logonInfo = table.LogOnInfo;
                     if (string.Equals(providerName, "System.Data.Odbc", StringComparison.OrdinalIgnoreCase))
                     {
-                        logonInfo.ConnectionInfo.ServerName = fullConnectionString;
+                        // For ODBC, ServerName should be the DSN name or the full connection string
+                        logonInfo.ConnectionInfo.ServerName = string.IsNullOrEmpty(server) ? fullConnectionString : server;
                     }
                     else
                     {
                         logonInfo.ConnectionInfo.ServerName = server;
                     }
-                    logonInfo.ConnectionInfo.DatabaseName = database;
+
+                    if (!string.IsNullOrEmpty(database))
+                    {
+                        logonInfo.ConnectionInfo.DatabaseName = database;
+                    }
+
                     if (integratedSecurity)
                     {
                         logonInfo.ConnectionInfo.IntegratedSecurity = true;
                     }
-                    else
+                    else if (!string.IsNullOrEmpty(userId))
                     {
                         logonInfo.ConnectionInfo.UserID = userId;
-                        logonInfo.ConnectionInfo.Password = password ?? string.Empty;
+                        if (!string.IsNullOrEmpty(password))
+                        {
+                            logonInfo.ConnectionInfo.Password = password;
+                        }
                         logonInfo.ConnectionInfo.IntegratedSecurity = false;
                     }
                     table.ApplyLogOnInfo(logonInfo);
@@ -292,6 +346,8 @@ foreach (ReportDocument subreport in rd.Subreports)
                     server = builder["Server"] as string;
                 else if (builder.ContainsKey("Data Source"))
                     server = builder["Data Source"] as string;
+                else if (builder.ContainsKey("DSN"))
+                    server = builder["DSN"] as string;
                 else
                     server = string.Empty;
 
@@ -309,6 +365,11 @@ foreach (ReportDocument subreport in rd.Subreports)
                 {
                     string trusted = builder["Trusted_Connection"] as string;
                     integratedSecurity = "yes".Equals(trusted, StringComparison.OrdinalIgnoreCase) || "true".Equals(trusted, StringComparison.OrdinalIgnoreCase);
+                }
+                else if (builder.ContainsKey("Integrated Security"))
+                {
+                    string integrated = builder["Integrated Security"] as string;
+                    integratedSecurity = "SSPI".Equals(integrated, StringComparison.OrdinalIgnoreCase) || "true".Equals(integrated, StringComparison.OrdinalIgnoreCase) || "yes".Equals(integrated, StringComparison.OrdinalIgnoreCase);
                 }
 
                 // Extract User/Password
