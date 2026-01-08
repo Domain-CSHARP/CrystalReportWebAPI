@@ -17,14 +17,20 @@ namespace CrystalReportWebAPI.Controllers
         [ClientCacheWithEtag(60)]  //1 min client side caching
         public HttpResponseMessage MewahTaxInvoiceSalesLocalEINV(string referenceNumber)
         {
-            string reportPath = "~/Reports/Mewah";
-            string reportFileName = "TaxInvoice_SalesLocal_EINV.rpt";
-            string exportFilename = "TaxInvoice_SalesLocal_EINV.pdf";
+            try
+            {
+                string reportPath = "~/Reports/Mewah";
+                string reportFileName = "TaxInvoice_SalesLocal_EINV.rpt";
+                string exportFilename = "TaxInvoice_SalesLocal_EINV.pdf";
 
-            string recordSelectionFormula = "{INVOICE.INVOICE} = '" + referenceNumber + "'";
-            HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename, null, recordSelectionFormula);
-            //HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename);
-            return result;
+                string recordSelectionFormula = "{INVOICE.INVOICE} = '" + referenceNumber + "'";
+                HttpResponseMessage result = CrystalReport.RenderReport(reportPath, reportFileName, exportFilename, null, recordSelectionFormula);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                return Request.CreateErrorResponse(System.Net.HttpStatusCode.InternalServerError, ex.Message);
+            }
         }
     }
 }

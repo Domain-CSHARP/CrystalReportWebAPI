@@ -33,11 +33,10 @@ namespace CrystalReportWebAPI.Utilities
 
             // Debug: Log current Windows identity for troubleshooting
             string currentUser = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
-            System.Diagnostics.Debug.WriteLine($"CrystalReport: Current Windows identity: {currentUser}");
-            System.Diagnostics.Debug.WriteLine($"CrystalReport: Provider: {providerName}");
-            System.Diagnostics.Debug.WriteLine($"CrystalReport: Full Connection String: {fullConnectionString}");
-            System.Diagnostics.Debug.WriteLine($"CrystalReport: Using Integrated Security: {integratedSecurity}");
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: Current identity: {currentUser}");
             System.Diagnostics.Debug.WriteLine($"CrystalReport: Server: {server}, Database: {database}");
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: Provider: {providerName}");
+            System.Diagnostics.Debug.WriteLine($"CrystalReport: Using Integrated Security: {integratedSecurity}");
 
             // Main report tables
 foreach (Table table in rd.Database.Tables)
@@ -86,7 +85,7 @@ foreach (Table table in rd.Database.Tables)
         string identity = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
         System.Diagnostics.Debug.WriteLine($"CrystalReport: ERROR on table {table.Name} (Location: {table.Location}): {ex.Message}");
         // Provide more context in the exception including the identity running the process
-        throw new Exception($"Failed to set location for table '{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Original error: {ex.Message}", ex);
+        throw new Exception($"Failed to set location for table '{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Connection String Used: {fullConnectionString}. Original error: {ex.Message}", ex);
     }
 }
 
@@ -136,7 +135,7 @@ foreach (ReportDocument subreport in rd.Subreports)
         {
             string identity = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
             System.Diagnostics.Debug.WriteLine($"CrystalReport: ERROR on subreport table {subreport.Name}.{table.Name} (Location: {table.Location}): {ex.Message}");
-            throw new Exception($"Failed to set location for subreport table '{subreport.Name}.{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Original error: {ex.Message}", ex);
+            throw new Exception($"Failed to set location for subreport table '{subreport.Name}.{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Connection String Used: {fullConnectionString}. Original error: {ex.Message}", ex);
         }
     }
 }
