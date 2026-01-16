@@ -3,7 +3,8 @@ using CrystalReportWebAPI.Utilities;
 using System;
 using System.Collections.Generic;
 using System.Data;
-using System.Data.SqlClient;
+using System.Data.Common;
+using System.Configuration;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -17,6 +18,27 @@ namespace CrystalReportWebAPI.Controllers
     public class EmailController : ApiController
     {
         private static readonly object _logLock = new object();
+        private string _providerName;
+
+        private bool IsOdbc => _providerName == "System.Data.Odbc";
+
+        private void AddParam(DbCommand cmd, string name, object value)
+        {
+            var param = cmd.CreateParameter();
+            if (IsOdbc)
+            {
+                // Positional parameters for ODBC, name doesn't matter much but it helps for debugging
+                // SQL must use '?' instead of '@name'
+                param.ParameterName = name; 
+                cmd.CommandText = cmd.CommandText.Replace(name, "?");
+            }
+            else
+            {
+                param.ParameterName = name;
+            }
+            param.Value = value ?? DBNull.Value;
+            cmd.Parameters.Add(param);
+        }
 
         private void WriteLog(string logType, string message, string invoiceNumber = null)
         {
@@ -55,14 +77,21 @@ namespace CrystalReportWebAPI.Controllers
         {
             try
             {
-                using (SqlConnection conn = new SqlConnection(System.Configuration.ConfigurationManager.ConnectionStrings["DefaultConnection"].ConnectionString))
+                var settings = ConfigurationManager.ConnectionStrings["DefaultConnection"];
+                string connectionString = settings.ConnectionString;
+                _providerName = settings.ProviderName;
+                DbProviderFactory factory = DbProviderFactories.GetFactory(_providerName);
+
+                using (DbConnection conn = factory.CreateConnection())
                 {
+                    conn.ConnectionString = connectionString;
                     conn.Open();
 
                     // Check if there are pending emails to process
                     string checkQuery = "SELECT COUNT(*) FROM VALIDATED_LOCAL_INV_PENDING_EMAIL";
-                    SqlCommand checkCmd = new SqlCommand(checkQuery, conn);
-                    int pendingCount = (int)checkCmd.ExecuteScalar();
+                    DbCommand checkCmd = conn.CreateCommand();
+                    checkCmd.CommandText = checkQuery;
+                    int pendingCount = Convert.ToInt32(checkCmd.ExecuteScalar());
 
                     if (pendingCount == 0)
                     {
@@ -78,9 +107,10 @@ namespace CrystalReportWebAPI.Controllers
                     List<string> pendingInvoices = new List<string>();
                     string selectQuery = "SELECT invoice FROM VALIDATED_LOCAL_INV_PENDING_EMAIL";
 
-                    using (SqlCommand selectCmd = new SqlCommand(selectQuery, conn))
+                    using (DbCommand selectCmd = conn.CreateCommand())
                     {
-                        using (SqlDataReader reader = selectCmd.ExecuteReader())
+                        selectCmd.CommandText = selectQuery;
+                        using (DbDataReader reader = selectCmd.ExecuteReader())
                         {
                             while (reader.Read())
                             {
@@ -125,7 +155,7 @@ namespace CrystalReportWebAPI.Controllers
             }
         }
 
-        private void ProcessInvoiceEmail(SqlConnection conn, string invoiceNumber)
+        private void ProcessInvoiceEmail(DbConnection conn, string invoiceNumber)
         {
             string buyerCode = "";
             DateTime invoiceDate = DateTime.MinValue;
@@ -156,11 +186,12 @@ namespace CrystalReportWebAPI.Controllers
                 LEFT JOIN ACCODE a ON a.CODE = i.accode
                 WHERE i.INVOICE = @InvoiceNumber";
 
-            using (SqlCommand cmd = new SqlCommand(combinedQuery, conn))
+            using (DbCommand cmd = conn.CreateCommand())
             {
-                cmd.Parameters.AddWithValue("@InvoiceNumber", invoiceNumber);
+                cmd.CommandText = combinedQuery;
+                AddParam(cmd, "@InvoiceNumber", invoiceNumber);
 
-                using (SqlDataReader reader = cmd.ExecuteReader())
+                using (DbDataReader reader = cmd.ExecuteReader())
                 {
                     if (!reader.Read())
                     {
@@ -189,7 +220,6 @@ namespace CrystalReportWebAPI.Controllers
             {
                 string emailQuery = "SELECT ";
                 List<string> selectFields = new List<string>();
-                List<SqlParameter> parameters = new List<SqlParameter>();
 
                 if (!string.IsNullOrEmpty(emailFieldName))
                 {
@@ -204,11 +234,12 @@ namespace CrystalReportWebAPI.Controllers
                 {
                     emailQuery += string.Join(", ", selectFields) + " FROM ACCODE WHERE CODE = @BuyerCode";
 
-                    using (SqlCommand emailCmd = new SqlCommand(emailQuery, conn))
+                    using (DbCommand emailCmd = conn.CreateCommand())
                     {
-                        emailCmd.Parameters.AddWithValue("@BuyerCode", buyerCode);
+                        emailCmd.CommandText = emailQuery;
+                        AddParam(emailCmd, "@BuyerCode", buyerCode);
 
-                        using (SqlDataReader emailReader = emailCmd.ExecuteReader())
+                        using (DbDataReader emailReader = emailCmd.ExecuteReader())
                         {
                             if (emailReader.Read())
                             {
@@ -279,35 +310,42 @@ namespace CrystalReportWebAPI.Controllers
                     GETDATE()
                 )";
 
-            SqlCommand insertCmd = new SqlCommand(insertQuery, conn);
-            insertCmd.Parameters.AddWithValue("@Sender", fieldBuyerEmail ?? "");
-            insertCmd.Parameters.AddWithValue("@CC", combinedCC);
-            insertCmd.Parameters.AddWithValue("@Subject", subject ?? "");
-            insertCmd.Parameters.AddWithValue("@Body", body ?? "");
-            insertCmd.Parameters.AddWithValue("@Attach1", pdfPath ?? "");
-
-            object identityResult = insertCmd.ExecuteScalar();
-            if (identityResult == null || identityResult == DBNull.Value)
+            using (DbCommand insertCmd = conn.CreateCommand())
             {
-                throw new Exception("Failed to get EmailKey after insert");
-            }
-            int EmailKey = Convert.ToInt32(identityResult);
+                insertCmd.CommandText = insertQuery;
+                
+                // CRITICAL: Order must match the query for ODBC positional parameters
+                AddParam(insertCmd, "@Sender", fieldBuyerEmail ?? "");
+                AddParam(insertCmd, "@CC", combinedCC);
+                AddParam(insertCmd, "@Subject", subject ?? "");
+                AddParam(insertCmd, "@Body", body ?? "");
+                AddParam(insertCmd, "@Attach1", pdfPath ?? "");
 
-            // Send email using PowerShell
-            PowerShellSendMail(EmailKey, conn);
+                object identityResult = insertCmd.ExecuteScalar();
+                if (identityResult == null || identityResult == DBNull.Value)
+                {
+                    throw new Exception("Failed to get EmailKey after insert");
+                }
+                int EmailKey = Convert.ToInt32(identityResult);
 
-            // Update invoice
-            string updateQuery = @"
+                // Send email using PowerShell
+                PowerShellSendMail(EmailKey, conn);
+
+                // Update invoice
+                string updateQuery = @"
                 UPDATE INVOICE
                 SET EMAILSENT_USER = 'API',
-                    EMAILSENT_DATE = GETDATE()
+                    EMAILSENT_DATE = GETDATE(),
+                    EMAILSENT = 1
                 WHERE INVOICE = @InvoiceNumber";
 
-            SqlCommand updateCmd = new SqlCommand(updateQuery, conn);
-            updateCmd.Parameters.AddWithValue("@InvoiceNumber", invoiceNumber);
-            updateCmd.ExecuteNonQuery();
-
-            // LogEmailProcess("ProcessInvoiceEmail", "Success", $"Successfully processed invoice: {invoiceNumber}", invoiceNumber);
+                using (DbCommand updateCmd = conn.CreateCommand())
+                {
+                    updateCmd.CommandText = updateQuery;
+                    AddParam(updateCmd, "@InvoiceNumber", invoiceNumber);
+                    updateCmd.ExecuteNonQuery();
+                }
+            }
         }
 
         private string GenerateAndSavePdf(string invoiceNumber, DateTime invoiceDate, string buyerName, string pdfFolder)
@@ -343,7 +381,7 @@ namespace CrystalReportWebAPI.Controllers
             }
         }
 
-        private string PrepareEmailBody(string bodyTemplate, string invoiceNumber, DateTime invoiceDate, string buyerCode, SqlConnection conn)
+        private string PrepareEmailBody(string bodyTemplate, string invoiceNumber, DateTime invoiceDate, string buyerCode, DbConnection conn)
         {
             string body = bodyTemplate;
 
@@ -357,11 +395,12 @@ namespace CrystalReportWebAPI.Controllers
                     (SELECT TOP 1 CONTACT1 FROM ACCODE WHERE CODE = @BuyerCode) as Contact,
                     (SELECT TOP 1 SENDER_DETAIL FROM acc_sign WHERE acc_sign = '') as SenderDetail";
 
-            using (SqlCommand cmd = new SqlCommand(combinedQuery, conn))
+            using (DbCommand cmd = conn.CreateCommand())
             {
-                cmd.Parameters.AddWithValue("@BuyerCode", buyerCode);
+                cmd.CommandText = combinedQuery;
+                AddParam(cmd, "@BuyerCode", buyerCode);
 
-                using (SqlDataReader reader = cmd.ExecuteReader())
+                using (DbDataReader reader = cmd.ExecuteReader())
                 {
                     if (reader.Read())
                     {
@@ -381,7 +420,7 @@ namespace CrystalReportWebAPI.Controllers
             return body;
         }
 
-        private void PowerShellSendMail(int EmailKey, SqlConnection conn)
+        private void PowerShellSendMail(int EmailKey, DbConnection conn)
         {
             string sender = "";
             string recipient = "";
@@ -392,8 +431,9 @@ namespace CrystalReportWebAPI.Controllers
 
             // Get sender from profile
             string senderQuery = "SELECT TOP 1 EMAIL_SERVER_GRP_EMAIL FROM PROFILE";
-            using (SqlCommand senderCmd = new SqlCommand(senderQuery, conn))
+            using (DbCommand senderCmd = conn.CreateCommand())
             {
+                senderCmd.CommandText = senderQuery;
                 object result = senderCmd.ExecuteScalar();
                 if (result != DBNull.Value)
                 {
@@ -403,10 +443,12 @@ namespace CrystalReportWebAPI.Controllers
 
             // Retrieve email details from LogMail_Inv
             string selectQuery = "SELECT SENDER, CC, SUBJECT, BODY, ATTACH1, ATTACH2, ATTACH3 FROM LogMail_Inv WHERE pkkey = @EmailKey";
-            using (SqlCommand cmd = new SqlCommand(selectQuery, conn))
+            using (DbCommand cmd = conn.CreateCommand())
             {
-                cmd.Parameters.AddWithValue("@EmailKey", EmailKey);
-                using (SqlDataReader reader = cmd.ExecuteReader())
+                cmd.CommandText = selectQuery;
+                AddParam(cmd, "@EmailKey", EmailKey);
+
+                using (DbDataReader reader = cmd.ExecuteReader())
                 {
                     if (reader.Read())
                     {
@@ -459,8 +501,11 @@ namespace CrystalReportWebAPI.Controllers
                         WriteLog("POWERSHELL", $"PowerShell script executed successfully. Exit code: {process.ExitCode}", EmailKey.ToString());
                         // Update status and sent date
                         string updateStr = $"UPDATE LogMail_Inv SET status = 1, sent = GETDATE() WHERE pkkey = {EmailKey}";
-                        SqlCommand updateCmd = new SqlCommand(updateStr, conn);
-                        updateCmd.ExecuteNonQuery();
+                        using (DbCommand updateCmd = conn.CreateCommand())
+                        {
+                            updateCmd.CommandText = updateStr;
+                            updateCmd.ExecuteNonQuery();
+                        }
                     }
                     else
                     {
