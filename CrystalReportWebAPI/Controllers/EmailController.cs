@@ -75,6 +75,7 @@ namespace CrystalReportWebAPI.Controllers
         [HttpGet]
         public HttpResponseMessage ProcessPendingInvoices()
         {
+            WriteLog("INFO", "=== API Execution Started: ProcessPendingInvoices ===");
             try
             {
                 var settings = ConfigurationManager.ConnectionStrings["DefaultConnection"];
@@ -92,9 +93,11 @@ namespace CrystalReportWebAPI.Controllers
                     DbCommand checkCmd = conn.CreateCommand();
                     checkCmd.CommandText = checkQuery;
                     int pendingCount = Convert.ToInt32(checkCmd.ExecuteScalar());
+                    WriteLog("INFO", $"Found {pendingCount} pending emails to process.");
 
                     if (pendingCount == 0)
                     {
+                        WriteLog("INFO", "=== API Execution Ended: No pending emails ===");
                         return Request.CreateResponse(HttpStatusCode.OK, new
                         {
                             Success = true,
@@ -119,6 +122,8 @@ namespace CrystalReportWebAPI.Controllers
                         }
                     }
 
+                    WriteLog("INFO", $"Data successfully retrieved for pending invoices: {string.Join(", ", pendingInvoices)}");
+
                     // Now process each invoice with the reader closed
                     List<string> processedInvoices = new List<string>();
                     List<string> failedInvoices = new List<string>();
@@ -127,13 +132,14 @@ namespace CrystalReportWebAPI.Controllers
                     {
                                 try
                                 {
+                                    WriteLog("INFO", $"Starting processing loop for invoice: {invoiceNumber}", invoiceNumber);
                                     ProcessInvoiceEmail(conn, invoiceNumber);
                                     processedInvoices.Add(invoiceNumber);
                                 }
                                 catch (Exception ex)
                                 {
                                     failedInvoices.Add($"{invoiceNumber}: {ex.Message}");
-                                    // LogEmailProcess("ProcessPendingInvoices", "Error", $"Failed to process invoice {invoiceNumber}: {ex.Message}", invoiceNumber);
+                                    WriteLog("ERROR", $"Failed to process invoice {invoiceNumber}: {ex.Message}", invoiceNumber);
                                 }
                     }
 
@@ -214,6 +220,7 @@ namespace CrystalReportWebAPI.Controllers
                     }
                 }
             }
+            WriteLog("INFO", "Invoice data and buyer details successfully retrieved.", invoiceNumber);
 
             // Get actual email addresses from ACCODE table using the field names
             if (!string.IsNullOrEmpty(emailFieldName) || !string.IsNullOrEmpty(emailCCFieldName))
@@ -258,7 +265,18 @@ namespace CrystalReportWebAPI.Controllers
             }
 
             // Generate PDF
-            string pdfPath = GenerateAndSavePdf(invoiceNumber, invoiceDate, buyerName, pdfFolder);
+            WriteLog("INFO", "Attempting to generate PDF...", invoiceNumber);
+            string pdfPath;
+            try
+            {
+                pdfPath = GenerateAndSavePdf(invoiceNumber, invoiceDate, buyerName, pdfFolder);
+                WriteLog("INFO", "PDF generated and saved successfully.", invoiceNumber);
+            }
+            catch (Exception ex)
+            {
+                WriteLog("ERROR", $"PDF generation failed: {ex.Message}", invoiceNumber);
+                throw;
+            }
 
             // Prepare email content
             string subject = $"E-INVOICE {buyerName} - DELIVERY DATED {invoiceDate:dd/MM/yy}";
@@ -328,8 +346,10 @@ namespace CrystalReportWebAPI.Controllers
                 }
                 int EmailKey = Convert.ToInt32(identityResult);
 
-                // Send email using PowerShell
-                PowerShellSendMail(EmailKey, conn);
+                // Send email using SmtpClient
+                WriteLog("INFO", "Ready to send email via SMTP...", invoiceNumber);
+                SendEmailInternal(EmailKey, conn);
+                WriteLog("INFO", "Email sent successfully via internal helper.", invoiceNumber);
 
                 // Update invoice
                 string updateQuery = @"
@@ -344,6 +364,7 @@ namespace CrystalReportWebAPI.Controllers
                     updateCmd.CommandText = updateQuery;
                     AddParam(updateCmd, "@InvoiceNumber", invoiceNumber);
                     updateCmd.ExecuteNonQuery();
+                    WriteLog("INFO", "Database updated successfully (EMAILSENT=1). Process complete for this invoice.", invoiceNumber);
                 }
             }
         }
@@ -420,14 +441,14 @@ namespace CrystalReportWebAPI.Controllers
             return body;
         }
 
-        private void PowerShellSendMail(int EmailKey, DbConnection conn)
+        private void SendEmailInternal(int EmailKey, DbConnection conn)
         {
             string sender = "";
             string recipient = "";
             string recipientCC = "";
             string subject = "";
             string body = "";
-            string attach = "";
+            List<string> attachmentPaths = new List<string>();
 
             // Get sender from profile
             string senderQuery = "SELECT TOP 1 EMAIL_SERVER_GRP_EMAIL FROM PROFILE";
@@ -457,67 +478,86 @@ namespace CrystalReportWebAPI.Controllers
                         subject = Convert.ToString(reader["SUBJECT"]).Trim();
                         body = Convert.ToString(reader["BODY"]).Trim();
 
-                        // Build attach string
+                        // Build attachment list
                         for (int i = 1; i <= 3; i++)
                         {
                             string path = Convert.ToString(reader["ATTACH" + i]).Trim();
                             if (!string.IsNullOrEmpty(path) && File.Exists(path))
                             {
-                                if (!string.IsNullOrEmpty(attach))
-                                {
-                                    attach += ";";
-                                }
-                                attach += path;
+                                attachmentPaths.Add(path);
                             }
                         }
                     }
                 }
             }
 
-            // Prepare PowerShell command
-            string scriptPath = Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath("~/"), "..", "EmailSender.ps1");
-            string arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -EmailSender \"{sender}\" -Recipients \"{recipient}\" -CCRecipients \"{recipientCC}\" -Subject \"{subject}\" -Body \"{body}\" -Attach \"{attach}\"";
-
-            // Log PowerShell execution attempt
-            WriteLog("POWERSHELL", $"Attempting to execute: powershell.exe {arguments}", EmailKey.ToString());
-
-            // Execute PowerShell script
-            using (Process process = new Process())
+            try
             {
-                process.StartInfo.FileName = "powershell.exe";
-                process.StartInfo.Arguments = arguments;
-                process.StartInfo.UseShellExecute = false;
-                process.StartInfo.CreateNoWindow = true;
-                process.StartInfo.RedirectStandardOutput = true;
-                process.StartInfo.RedirectStandardError = true;
+                // Prepare PowerShell arguments
+                string scriptPath = Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath("~/"), "..", "EmailSender.ps1");
+                
+                // Escape quotes for command line arguments
+                string safeSubject = subject.Replace("\"", "\\\"");
+                string safeBody = body.Replace("\"", "\\\"");
+                string safeAttach = string.Join(";", attachmentPaths);
 
-                try
+                // Construct arguments string
+                // Note: We use -File to pass named parameters. 
+                // We wrap values in quotes to handle spaces and special chars.
+                string arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" " +
+                                 $"-EmailSender \"{sender}\" " +
+                                 $"-Recipients \"{recipient}\" " +
+                                 $"-CCRecipients \"{recipientCC}\" " +
+                                 $"-Subject \"{safeSubject}\" " +
+                                 $"-Body \"{safeBody}\" " +
+                                 $"-Attach \"{safeAttach}\"";
+
+                ProcessStartInfo psi = new ProcessStartInfo
                 {
-                    process.Start();
+                    FileName = "powershell.exe",
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                WriteLog("INFO", $"Executing PowerShell script: {scriptPath}", EmailKey.ToString());
+                // WriteLog("DEBUG", $"PowerShell Args: {arguments}", EmailKey.ToString()); // Uncomment for debugging if needed
+
+                using (Process process = Process.Start(psi))
+                {
+                    string output = process.StandardOutput.ReadToEnd();
+                    string error = process.StandardError.ReadToEnd();
                     process.WaitForExit();
 
-                    if (process.ExitCode == 0)
+                    if (!string.IsNullOrEmpty(output))
                     {
-                        WriteLog("POWERSHELL", $"PowerShell script executed successfully. Exit code: {process.ExitCode}", EmailKey.ToString());
-                        // Update status and sent date
-                        string updateStr = $"UPDATE LogMail_Inv SET status = 1, sent = GETDATE() WHERE pkkey = {EmailKey}";
-                        using (DbCommand updateCmd = conn.CreateCommand())
-                        {
-                            updateCmd.CommandText = updateStr;
-                            updateCmd.ExecuteNonQuery();
-                        }
+                        WriteLog("POWERSHELL", output.Trim(), EmailKey.ToString());
                     }
-                    else
+
+                    if (process.ExitCode != 0 || !string.IsNullOrEmpty(error))
                     {
-                        // Log error if needed
-                        string error = process.StandardError.ReadToEnd();
-                        WriteLog("ERROR", $"PowerShell script failed. Exit code: {process.ExitCode}. Error: {error}", EmailKey.ToString());
+                        string errorMsg = $"PowerShell script failed (ExitCode: {process.ExitCode}). Error: {error}";
+                        WriteLog("ERROR", errorMsg, EmailKey.ToString());
+                        throw new Exception(errorMsg);
                     }
                 }
-                catch (Exception ex)
+
+                WriteLog("INFO", $"Email sent successfully via PowerShell to {recipient}", EmailKey.ToString());
+
+                // Update status and sent date
+                string updateStr = $"UPDATE LogMail_Inv SET status = 1, sent = GETDATE() WHERE pkkey = {EmailKey}";
+                using (DbCommand updateCmd = conn.CreateCommand())
                 {
-                    WriteLog("ERROR", $"Failed to execute PowerShell script: {ex.Message}", EmailKey.ToString());
+                    updateCmd.CommandText = updateStr;
+                    updateCmd.ExecuteNonQuery();
                 }
+            }
+            catch (Exception ex)
+            {
+                WriteLog("ERROR", $"Failed to send email via SMTP: {ex.Message}", EmailKey.ToString());
+                throw;
             }
         }
 

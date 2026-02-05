@@ -24,7 +24,8 @@ namespace CrystalReportWebAPI.Utilities
             Dictionary<string, object> parameters,
             string recordSelectionFormula = null)
         {
-            var rd = new ReportDocument();
+            using (var rd = new ReportDocument())
+            {
 
             rd.Load(Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath(reportPath), reportFileName));
 
@@ -180,7 +181,7 @@ foreach (ReportDocument subreport in rd.Subreports)
             {
                 stream.CopyTo(ms);
             }
-
+            
             var result = new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new ByteArrayContent(ms.ToArray())
@@ -193,6 +194,7 @@ foreach (ReportDocument subreport in rd.Subreports)
             result.Content.Headers.ContentType =
                 new System.Net.Http.Headers.MediaTypeHeaderValue("application/pdf");
             return result;
+            }
         }
 
         public static void SaveReportToFile(
@@ -202,7 +204,8 @@ foreach (ReportDocument subreport in rd.Subreports)
             Dictionary<string, object> parameters = null,
             string recordSelectionFormula = null)
         {
-            var rd = new ReportDocument();
+            using (var rd = new ReportDocument())
+            {
 
             rd.Load(Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath(reportPath), reportFileName));
 
@@ -346,8 +349,7 @@ foreach (ReportDocument subreport in rd.Subreports)
 
             // Export directly to file
             rd.ExportToDisk(ExportFormatType.PortableDocFormat, outputFilePath);
-            rd.Close();
-            rd.Dispose();
+            }
         }
         private static void GetConnectionInfo(string connectionStringName, out string server, out string database, out string userId, out string password, out bool integratedSecurity, out string providerName, out string fullConnectionString)
         {
