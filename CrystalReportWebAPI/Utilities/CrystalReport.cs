@@ -202,17 +202,22 @@ foreach (ReportDocument subreport in rd.Subreports)
             string reportFileName,
             string outputFilePath,
             Dictionary<string, object> parameters = null,
-            string recordSelectionFormula = null)
+            string recordSelectionFormula = null,
+            Action<string> logger = null)
         {
+            logger?.Invoke($"CrystalReport: Starting SaveReportToFile for {reportFileName}");
             using (var rd = new ReportDocument())
             {
-
+            
+            logger?.Invoke($"CrystalReport: Loading report from {Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath(reportPath), reportFileName)}");
             rd.Load(Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath(reportPath), reportFileName));
+            logger?.Invoke("CrystalReport: Report loaded successfully.");
 
             // Set database connection
             GetConnectionInfo("DefaultConnection", out string server, out string database, out string userId, out string password, out bool integratedSecurity, out string providerName, out string fullConnectionString);
 
             // Main report tables
+            logger?.Invoke("CrystalReport: Applying database logon to main tables...");
             foreach (Table table in rd.Database.Tables)
             {
                 var logonInfo = table.LogOnInfo;
@@ -256,8 +261,10 @@ foreach (ReportDocument subreport in rd.Subreports)
                      throw new Exception($"Failed to set location for table '{table.Name}'. Connection info: Server={logonInfo.ConnectionInfo.ServerName}, Database={logonInfo.ConnectionInfo.DatabaseName}, Integrated={logonInfo.ConnectionInfo.IntegratedSecurity}, Identity={identity}. Original error: {ex.Message}", ex);
                 }
             }
+            logger?.Invoke("CrystalReport: Main tables logon applied.");
 
             // Subreport tables
+            logger?.Invoke("CrystalReport: Applying database logon to subreports...");
             foreach (ReportDocument subreport in rd.Subreports)
             {
                 foreach (Table table in subreport.Database.Tables)
@@ -348,7 +355,10 @@ foreach (ReportDocument subreport in rd.Subreports)
             }
 
             // Export directly to file
+            logger?.Invoke($"CrystalReport: Exporting to disk: {outputFilePath}");
             rd.ExportToDisk(ExportFormatType.PortableDocFormat, outputFilePath);
+            logger?.Invoke("CrystalReport: Export to disk completed successfully.");
+            rd.Close(); // Explicitly close the report to release resources immediately
             }
         }
         private static void GetConnectionInfo(string connectionStringName, out string server, out string database, out string userId, out string password, out bool integratedSecurity, out string providerName, out string fullConnectionString)

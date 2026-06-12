@@ -11,6 +11,7 @@ using System.Net;
 using System.Net.Http;
 using System.Web.Http;
 using System.Web.Hosting;
+using System.Text;
 
 namespace CrystalReportWebAPI.Controllers
 {
@@ -106,9 +107,9 @@ namespace CrystalReportWebAPI.Controllers
                         });
                     }
 
-                    // Get pending invoices first, then close the reader before processing
+                    // Get pending invoices first, then close the reader before processing (Limit to 10)
                     List<string> pendingInvoices = new List<string>();
-                    string selectQuery = "SELECT invoice FROM VALIDATED_LOCAL_INV_PENDING_EMAIL";
+                    string selectQuery = "SELECT TOP 10 invoice FROM VALIDATED_LOCAL_INV_PENDING_EMAIL";
 
                     using (DbCommand selectCmd = conn.CreateCommand())
                     {
@@ -130,17 +131,37 @@ namespace CrystalReportWebAPI.Controllers
 
                     foreach (string invoiceNumber in pendingInvoices)
                     {
-                                try
-                                {
-                                    WriteLog("INFO", $"Starting processing loop for invoice: {invoiceNumber}", invoiceNumber);
-                                    ProcessInvoiceEmail(conn, invoiceNumber);
-                                    processedInvoices.Add(invoiceNumber);
-                                }
-                                catch (Exception ex)
-                                {
-                                    failedInvoices.Add($"{invoiceNumber}: {ex.Message}");
-                                    WriteLog("ERROR", $"Failed to process invoice {invoiceNumber}: {ex.Message}", invoiceNumber);
-                                }
+                        try
+                        {
+                            string trimmedInvoiceNumber = invoiceNumber?.Trim();
+                            WriteLog("INFO", $"Starting processing loop for invoice: {trimmedInvoiceNumber}", trimmedInvoiceNumber);
+                            
+                            // CRITICAL: Open a NEW connection for each invoice to prevent connection state issues 
+                            // from stopping the entire batch if one fails.
+                            using (DbConnection invoiceConn = factory.CreateConnection())
+                            {
+                                invoiceConn.ConnectionString = connectionString;
+                                invoiceConn.Open();
+                                ProcessInvoiceEmail(invoiceConn, trimmedInvoiceNumber);
+                            }
+                            
+                            processedInvoices.Add(trimmedInvoiceNumber);
+                        }
+                        catch (Exception ex)
+                        {
+                            failedInvoices.Add($"{invoiceNumber}: {ex.Message}");
+                            WriteLog("ERROR", $"Failed to process invoice {invoiceNumber}: {ex.Message}", invoiceNumber);
+                        }
+                        finally
+                        {
+                            // CRITICAL: Force cleanup of Crystal Report COM objects to prevent "Print Job Limit" exhaustion
+                            try 
+                            {
+                                GC.Collect();
+                                GC.WaitForPendingFinalizers();
+                            }
+                            catch { /* Ignore GC errors */ }
+                        }
                     }
 
                     return Request.CreateResponse(HttpStatusCode.OK, new
@@ -204,15 +225,15 @@ namespace CrystalReportWebAPI.Controllers
                         throw new Exception($"Invoice {invoiceNumber} not found");
                     }
 
-                    buyerCode = Convert.ToString(reader["accode"]);
+                    buyerCode = Convert.ToString(reader["accode"]).Trim();
                     invoiceDate = reader["date"] != DBNull.Value ? (DateTime)reader["date"] : DateTime.MinValue;
-                    contractNumber = Convert.ToString(reader["smf"]);
-                    emailFieldName = Convert.ToString(reader["EMAIL_SERVER_FLD_RECIPIENT"]);
-                    emailCCFieldName = Convert.ToString(reader["EMAIL_SERVER_FLD_RECIPIENT_CC"]);
-                    pdfFolder = Convert.ToString(reader["PDF"]);
+                    contractNumber = Convert.ToString(reader["smf"]).Trim();
+                    emailFieldName = Convert.ToString(reader["EMAIL_SERVER_FLD_RECIPIENT"]).Trim();
+                    emailCCFieldName = Convert.ToString(reader["EMAIL_SERVER_FLD_RECIPIENT_CC"]).Trim();
+                    pdfFolder = Convert.ToString(reader["PDF"]).Trim();
                     bodyTemplate = Convert.ToString(reader["INVOICE_BODY_MSG"]);
-                    ccRecipients = Convert.ToString(reader["INVOICE_EMAIL"]);
-                    buyerName = Convert.ToString(reader["BuyerName"]);
+                    ccRecipients = Convert.ToString(reader["INVOICE_EMAIL"]).Trim();
+                    buyerName = Convert.ToString(reader["BuyerName"]).Trim();
 
                     if (string.IsNullOrEmpty(buyerName))
                     {
@@ -252,11 +273,11 @@ namespace CrystalReportWebAPI.Controllers
                             {
                                 if (!string.IsNullOrEmpty(emailFieldName))
                                 {
-                                    fieldBuyerEmail = Convert.ToString(emailReader["RecipientEmail"]);
+                                    fieldBuyerEmail = Convert.ToString(emailReader["RecipientEmail"]).Trim();
                                 }
                                 if (!string.IsNullOrEmpty(emailCCFieldName))
                                 {
-                                    fieldBuyerEmailCC = Convert.ToString(emailReader["CCEmail"]);
+                                    fieldBuyerEmailCC = Convert.ToString(emailReader["CCEmail"]).Trim();
                                 }
                             }
                         }
@@ -380,7 +401,11 @@ namespace CrystalReportWebAPI.Controllers
 
                 // Create PDF directory structure (same logic as @PdfPath from stored procedure)
                 string dateStr = invoiceDate.ToString("yyyyMMdd");
-                string pdfDirectory = Path.Combine(pdfFolder, "INVPDF", $"{dateStr}_{invoiceNumber}_{buyerName}");
+                string trimmedInvoiceNumber = invoiceNumber?.Trim();
+                string trimmedBuyerName = buyerName?.Trim();
+                string trimmedPdfFolder = pdfFolder?.Trim();
+
+                string pdfDirectory = Path.Combine(trimmedPdfFolder, "INVPDF", $"{dateStr}_{trimmedInvoiceNumber}_{trimmedBuyerName}");
 
                 if (!Directory.Exists(pdfDirectory))
                 {
@@ -388,11 +413,13 @@ namespace CrystalReportWebAPI.Controllers
                 }
 
                 // Generate filename (same logic as stored procedure)
-                string fileName = $"{invoiceNumber}_{dateStr}_{buyerName}.pdf";
+                string fileName = $"{trimmedInvoiceNumber}_{dateStr}_{trimmedBuyerName}.pdf";
                 string pdfPath = Path.Combine(pdfDirectory, fileName);
 
                 // Generate and save PDF directly to file system
-                CrystalReport.SaveReportToFile(reportPath, reportFileName, pdfPath, null, recordSelectionFormula);
+                // Pass a logging action that writes with specific prefix to existing log
+                CrystalReport.SaveReportToFile(reportPath, reportFileName, pdfPath, null, recordSelectionFormula, 
+                    (msg) => WriteLog("CRYSTAL", msg, invoiceNumber));
 
                 return pdfPath;
             }
@@ -439,6 +466,32 @@ namespace CrystalReportWebAPI.Controllers
             }
 
             return body;
+        }
+
+        private void WriteMailErrorLog(string message)
+        {
+            try
+            {
+                string logFolder = @"C:\Temp\Emaillogs";
+                if (!Directory.Exists(logFolder))
+                {
+                    Directory.CreateDirectory(logFolder);
+                }
+
+                string logFileName = $"mail_error_{DateTime.Now:yyyyMMdd}.log";
+                string logFilePath = Path.Combine(logFolder, logFileName);
+
+                string logEntry = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}";
+
+                lock (_logLock)
+                {
+                    File.AppendAllText(logFilePath, logEntry);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Logging to mail_error.log failed: {ex.Message}");
+            }
         }
 
         private void SendEmailInternal(int EmailKey, DbConnection conn)
@@ -493,58 +546,98 @@ namespace CrystalReportWebAPI.Controllers
 
             try
             {
-                // Prepare PowerShell arguments
-                string scriptPath = Path.Combine(System.Web.Hosting.HostingEnvironment.MapPath("~/"), "..", "EmailSender.ps1");
-                
-                // Escape quotes for command line arguments
-                string safeSubject = subject.Replace("\"", "\\\"");
-                string safeBody = body.Replace("\"", "\\\"");
-                string safeAttach = string.Join(";", attachmentPaths);
+                WriteMailErrorLog("========================================");
+                WriteMailErrorLog("Starting email process...");
+                WriteMailErrorLog($"FROM address (EMAIL_SERVER_GRP_EMAIL): '{sender}'");
 
-                // Construct arguments string
-                // Note: We use -File to pass named parameters. 
-                // We wrap values in quotes to handle spaces and special chars.
-                string arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" " +
-                                 $"-EmailSender \"{sender}\" " +
-                                 $"-Recipients \"{recipient}\" " +
-                                 $"-CCRecipients \"{recipientCC}\" " +
-                                 $"-Subject \"{safeSubject}\" " +
-                                 $"-Body \"{safeBody}\" " +
-                                 $"-Attach \"{safeAttach}\"";
+                WriteLog("INFO", "Preparing to send email directly via C# SmtpClient...", EmailKey.ToString());
 
-                ProcessStartInfo psi = new ProcessStartInfo
+                using (var mail = new System.Net.Mail.MailMessage())
                 {
-                    FileName = "powershell.exe",
-                    Arguments = arguments,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-
-                WriteLog("INFO", $"Executing PowerShell script: {scriptPath}", EmailKey.ToString());
-                // WriteLog("DEBUG", $"PowerShell Args: {arguments}", EmailKey.ToString()); // Uncomment for debugging if needed
-
-                using (Process process = Process.Start(psi))
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    string error = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
-
-                    if (!string.IsNullOrEmpty(output))
+                    if (string.IsNullOrWhiteSpace(sender))
                     {
-                        WriteLog("POWERSHELL", output.Trim(), EmailKey.ToString());
+                        throw new Exception("FROM address (EMAIL_SERVER_GRP_EMAIL in PROFILE) is empty. Cannot send email.");
+                    }
+                    mail.From = new System.Net.Mail.MailAddress(sender);
+
+                    // TO RECIPIENTS
+                    WriteMailErrorLog("Processing TO recipients...");
+                    var toEmails = recipient.Split(';');
+                    foreach (var email in toEmails)
+                    {
+                        var trimmedEmail = email.Trim();
+                        if (!string.IsNullOrEmpty(trimmedEmail))
+                        {
+                            mail.To.Add(new System.Net.Mail.MailAddress(trimmedEmail));
+                            WriteMailErrorLog($"Added TO recipient: {trimmedEmail}");
+                        }
                     }
 
-                    if (process.ExitCode != 0 || !string.IsNullOrEmpty(error))
+                    // CC RECIPIENTS (deduplicated, case-insensitive)
+                    if (!string.IsNullOrEmpty(recipientCC))
                     {
-                        string errorMsg = $"PowerShell script failed (ExitCode: {process.ExitCode}). Error: {error}";
-                        WriteLog("ERROR", errorMsg, EmailKey.ToString());
-                        throw new Exception(errorMsg);
+                        WriteMailErrorLog("Processing CC recipients...");
+                        var addedCC = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        var ccEmails = recipientCC.Split(';');
+                        foreach (var cc in ccEmails)
+                        {
+                            var trimmedCC = cc.Trim();
+                            if (!string.IsNullOrEmpty(trimmedCC) && addedCC.Add(trimmedCC))
+                            {
+                                mail.CC.Add(new System.Net.Mail.MailAddress(trimmedCC));
+                                WriteMailErrorLog($"Added CC recipient: {trimmedCC}");
+                            }
+                            else if (!string.IsNullOrEmpty(trimmedCC))
+                            {
+                                WriteMailErrorLog($"Skipped duplicate CC recipient: {trimmedCC}");
+                            }
+                        }
+                    }
+
+                    mail.Subject = subject;
+
+                    if (!string.IsNullOrEmpty(body))
+                    {
+                        WriteMailErrorLog("Converting newlines in email body to HTML line breaks (<br />)...");
+                        mail.Body = body.Replace("\r\n", "<br />").Replace("\n", "<br />");
+                    }
+                    else
+                    {
+                        mail.Body = body;
+                    }
+                    mail.IsBodyHtml = true;
+
+                    WriteMailErrorLog("Email subject and body assigned.");
+
+                    // ATTACHMENTS
+                    if (attachmentPaths.Count > 0)
+                    {
+                        WriteMailErrorLog("Processing attachments...");
+                        foreach (var path in attachmentPaths)
+                        {
+                            if (File.Exists(path))
+                            {
+                                mail.Attachments.Add(new System.Net.Mail.Attachment(path));
+                                WriteMailErrorLog($"Attachment added: {path}");
+                            }
+                            else
+                            {
+                                WriteMailErrorLog($"Attachment file not found: {path}");
+                            }
+                        }
+                    }
+
+                    WriteMailErrorLog("Creating SMTP client...");
+                    using (var smtp = new System.Net.Mail.SmtpClient("192.168.2.14", 25))
+                    {
+                        smtp.Timeout = 15000; // 15 seconds
+                        WriteMailErrorLog($"Sending email via 192.168.2.14:25 to {recipient}");
+                        smtp.Send(mail);
                     }
                 }
 
-                WriteLog("INFO", $"Email sent successfully via PowerShell to {recipient}", EmailKey.ToString());
+                WriteMailErrorLog($"Email sent successfully to {recipient}");
+                WriteLog("INFO", $"Email sent successfully via C# SmtpClient to {recipient}", EmailKey.ToString());
 
                 // Update status and sent date
                 string updateStr = $"UPDATE LogMail_Inv SET status = 1, sent = GETDATE() WHERE pkkey = {EmailKey}";
@@ -556,8 +649,20 @@ namespace CrystalReportWebAPI.Controllers
             }
             catch (Exception ex)
             {
-                WriteLog("ERROR", $"Failed to send email via SMTP: {ex.Message}", EmailKey.ToString());
-                throw;
+                string errorMsg = $"Error sending email: {ex.Message}";
+                if (ex.InnerException != null)
+                {
+                    errorMsg += $" | Inner Error: {ex.InnerException.Message}";
+                }
+                WriteMailErrorLog(errorMsg);
+                WriteLog("ERROR", $"Failed to send email via SMTP: {errorMsg}", EmailKey.ToString());
+                throw new Exception(errorMsg, ex);
+            }
+            finally
+            {
+                WriteMailErrorLog("Cleaning up resources...");
+                WriteMailErrorLog("Email process completed.");
+                WriteMailErrorLog("========================================");
             }
         }
 

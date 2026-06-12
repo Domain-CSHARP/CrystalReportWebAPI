@@ -4,62 +4,204 @@ param (
     [string]$CCRecipients,
     [string]$Subject,
     [string]$Body,
-    [string]$Attach
+    [string]$Attach,
+    [string]$BodyBase64
 )
 
-# Define variables
-$smtpServer = "www.domainjb.com" # Replace with your SMTP server
-$smtpPort = 587 # Adjust if needed
-$fromEmail = $EmailSender # Sender email
-$toEmails = $Recipients -split ";" # Split recipients by semicolon
-$ccEmails = $CCRecipients -split ";" # Split CC recipients by semicolon
-$attachments = $Attach -split ";" # Split attachments by semicolon
+# =========================
+# CONFIG
+# =========================
+$smtpServer = "192.168.2.14"
+$smtpPort = 25
 
-$emailSubject = $Subject
-$emailBody = $Body
+$logFolder = "C:\Temp\Emaillogs"
+$logFile = "$logFolder\mail_error.log"
 
-# Ensure the Temp folder exists
-if (!(Test-Path "C:\\Temp")) {
-    New-Item -ItemType Directory -Path "C:\\Temp" | Out-Null
+# =========================
+# LOG FUNCTION
+# =========================
+function Write-Log {
+    param([string]$message)
+
+    try {
+        # Ensure log folder exists
+        if (!(Test-Path $logFolder)) {
+            New-Item -ItemType Directory -Path $logFolder -Force | Out-Null
+        }
+
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path $logFile -Value "$timestamp $message"
+    }
+    catch {
+        Write-Host "[LOG ERROR] $($_.Exception.Message)"
+        Write-Host "[LOG MESSAGE] $message"
+    }
 }
 
+# =========================
+# START PROCESS
+# =========================
 try {
-    $emailMessage = New-Object System.Net.Mail.MailMessage
-    $emailMessage.From = $fromEmail
 
-    # Add To recipients
-    foreach ($email in $toEmails) {
-        if ($email -match "\S") { $emailMessage.To.Add($email.Trim()) }
-    }
+    Write-Log "========================================"
+    Write-Log "Starting email process..."
 
-    # Add CC recipients
-    foreach ($ccEmail in $ccEmails) {
-        if ($ccEmail -match "\S") { $emailMessage.CC.Add($ccEmail.Trim()) }
-    }
+    # =========================
+    # DECODE BASE64 BODY
+    # =========================
+    if ($BodyBase64) {
+        try {
+            Write-Log "Decoding Base64 email body..."
 
-    $emailMessage.Subject = $emailSubject
-    $emailMessage.Body = $emailBody
+            $decodedBytes = [System.Convert]::FromBase64String($BodyBase64)
+            $Body = [System.Text.Encoding]::UTF8.GetString($decodedBytes)
 
-    # Add attachments
-    foreach ($file in $attachments) {
-        if ($file -match "\S" -and (Test-Path $file)) {
-            $attachment = New-Object System.Net.Mail.Attachment($file)
-            $emailMessage.Attachments.Add($attachment)
+            Write-Log "Base64 body decoded successfully."
+        }
+        catch {
+            Write-Log "Failed to decode Base64 body. Error: $($_.Exception.Message)"
         }
     }
 
-    # Configure SMTP client
+    # =========================
+    # CREATE EMAIL
+    # =========================
+    Write-Log "Creating MailMessage object..."
+
+    $emailMessage = New-Object System.Net.Mail.MailMessage
+
+    $emailMessage.From = $EmailSender
+
+    # =========================
+    # TO RECIPIENTS
+    # =========================
+    Write-Log "Processing TO recipients..."
+
+    $toEmails = $Recipients -split ";"
+
+    foreach ($email in $toEmails) {
+
+        $trimmedEmail = $email.Trim()
+
+        if ($trimmedEmail) {
+            $emailMessage.To.Add($trimmedEmail)
+            Write-Log "Added TO recipient: $trimmedEmail"
+        }
+    }
+
+    # =========================
+    # CC RECIPIENTS
+    # =========================
+    if ($CCRecipients) {
+
+        Write-Log "Processing CC recipients..."
+
+        $ccEmails = $CCRecipients -split ";"
+
+        foreach ($cc in $ccEmails) {
+
+            $trimmedCC = $cc.Trim()
+
+            if ($trimmedCC) {
+                $emailMessage.CC.Add($trimmedCC)
+                Write-Log "Added CC recipient: $trimmedCC"
+            }
+        }
+    }
+
+    # =========================
+    # SUBJECT & BODY
+    # =========================
+    $emailMessage.Subject = $Subject
+
+    if ($Body) {
+        Write-Log "Converting newlines in email body to HTML line breaks (<br />)..."
+        $emailMessage.Body = $Body -replace "`r`n", "<br />" -replace "`n", "<br />"
+    } else {
+        $emailMessage.Body = $Body
+    }
+
+    $emailMessage.IsBodyHtml = $true
+
+    Write-Log "Email subject and body assigned."
+
+    # =========================
+    # ATTACHMENTS
+    # =========================
+    if ($Attach) {
+
+        Write-Log "Processing attachments..."
+
+        $attachments = $Attach -split ";"
+
+        foreach ($file in $attachments) {
+
+            $trimmedFile = $file.Trim()
+
+            if ($trimmedFile) {
+
+                if (Test-Path $trimmedFile) {
+
+                    $emailMessage.Attachments.Add($trimmedFile)
+
+                    Write-Log "Attachment added: $trimmedFile"
+                }
+                else {
+
+                    Write-Log "Attachment file not found: $trimmedFile"
+                }
+            }
+        }
+    }
+
+    # =========================
+    # SMTP CLIENT
+    # =========================
+    Write-Log "Creating SMTP client..."
+
     $smtpClient = New-Object System.Net.Mail.SmtpClient($smtpServer, $smtpPort)
+
+    $smtpClient.Timeout = 15000
+
+    Write-Log "Sending email via $($smtpServer):$smtpPort to $Recipients"
+
+    # =========================
+    # SEND EMAIL
+    # =========================
     $smtpClient.Send($emailMessage)
 
-    Write-Host "Email sent successfully to $($toEmails -join ', ') with CC to $($ccEmails -join ', ')."
+    Write-Log "Email sent successfully to $Recipients"
 
-} catch {
-    Write-Host "Error sending email: $_"
-} finally {
-    # Dispose of the attachments and message to release the files
-    foreach ($attachment in $emailMessage.Attachments) {
-        $attachment.Dispose()
+    Write-Host "Email sent successfully."
+
+}
+catch {
+
+    $errorMessage = "Error sending email: $($_.Exception.Message)"
+
+    if ($_.Exception.InnerException) {
+        $errorMessage += " | Inner Error: $($_.Exception.InnerException.Message)"
     }
-    $emailMessage.Dispose()
+
+    Write-Log $errorMessage
+
+    Write-Error $errorMessage
+
+    exit 1
+}
+finally {
+
+    Write-Log "Cleaning up resources..."
+
+    if ($emailMessage) {
+
+        foreach ($attachment in $emailMessage.Attachments) {
+            $attachment.Dispose()
+        }
+
+        $emailMessage.Dispose()
+    }
+
+    Write-Log "Email process completed."
+    Write-Log "========================================"
 }
